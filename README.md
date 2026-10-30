@@ -7,6 +7,11 @@ shows `diff A B`, `diff B C`, `diff C D`, `diff D E` one at a time. Navigation
 never wraps. Merges follow the first-parent path, so each step is a clean
 parent→child diff.
 
+## Dependencies
+
+- [uv](https://docs.astral.sh/uv/) (installs Python 3.12+ and the Python deps)
+- `git` on your `PATH`
+
 ## Run
 
 ```sh
