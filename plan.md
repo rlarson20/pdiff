@@ -4,25 +4,26 @@ Stages run from the current state to a deployable, defensible portfolio project.
 
 ## Stage 1: Foundation (make it a real CLI tool)
 Goal: runnable from anywhere with predictable behavior, and safe to keep building on.
-- [] `--repo PATH` / `-C PATH` arg: point the app at a different repo instead of the cwd (git layer currently relies on the cwd, so thread a `cwd` through the `git()` helper rather than `os.chdir`; update the `lru_cache`d loaders so the repo is part of the cache key)
-- [] cli args to change default behavior (whitespace, word-diff, context lines, stat, etc.)
-- [] range from refs: `pdiff main..feature`, skipping the pickers
-- [] clear errors: not a git repo, bad ref, non-linear history, empty range
-- [] large-diff safety: truncate/lazy-render huge diffs, skip binary files, bound the `lru_cache`
-- [] CI: GitHub Actions running pytest on Linux and macOS, Python 3.12 and 3.13
+- [x] `-C PATH` arg: point the app at a different repo (implemented as one `os.chdir` in `main`, since a process only ever views one repo)
+- [x] cli args to change default behavior (whitespace, word-diff, context lines, stat, etc.)
+- [x] range from refs: `pdiff main..feature`, skipping the pickers
+- [x] clear errors: not a git repo, bad ref, non-linear history, empty range
+- [x] large-diff safety: per-step render cap (`--max-lines`, `a` to show all); git already prints binaries as one line; caches are bounded at 64
+  - [] the cap is render-only: git output is still fully parsed by `Text.from_ansi`, so a multi-hundred-MB diff is still slow to load
+- [x] CI: GitHub Actions running pytest on Linux and macOS, Python 3.12 and 3.13
 - [] split `pdiff/app.py` into modules (git layer, pickers, screens) once it stops fitting in your head
 
 ## Stage 2: Daily-driver features (make it worth using)
 Goal: the review workflow is better than `git log -p`.
-- [] jump (`g`) to commit N or a SHA
+- [x] jump (`:`) to step N, a SHA or a ref
 - [] search (`/`) commit messages or diff content (`git log -S`/`-G` style)
 - [] file filter: limit the walk to commits touching a path/glob, optionally show only that path's hunks
-- [] per-file and per-hunk navigation within a step (`]`/`[`)
+- [x] per-file and per-hunk navigation within a step (`n`/`N`, `}`/`{`)
 - [] stat overview as a navigator: list of steps with `--stat` summaries, jump to a step
 - [] mini-map / progress bar of the whole chain (clickable; Textual already gives us mouse input)
-- [] copy/yank (`y`): SHA, current diff, permalink
+- [x] copy/yank: `y` SHA, `Y` patch, `p` permalink (origin's web URL + `/commit/<sha>`)
 - [] open the current step in `$EDITOR` at file and line
-- [] `?` help overlay generated from the bindings
+- [x] `?` help overlay generated from the bindings
 
 ## Stage 3: Configuration and polish
 Goal: it fits into people's existing terminal setups.
