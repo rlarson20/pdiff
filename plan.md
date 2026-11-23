@@ -24,6 +24,7 @@ Goal: the review workflow is better than `git log -p`.
 - [x] copy/yank: `y` SHA, `Y` patch, `p` permalink (origin's web URL + `/commit/<sha>`)
 - [] open the current step in `$EDITOR` at file and line
 - [x] `?` help overlay generated from the bindings
+- [x] compare a branch against its base: `pdiff A...B`, or `c` in the branch picker
 
 ## Stage 3: Configuration and polish
 Goal: it fits into people's existing terminal setups.

@@ -142,32 +142,51 @@ def commit_chain(a: str, e: str) -> list[Commit]:
     return chain
 
 
-def parse_range(spec: str) -> tuple[str, str]:
-    """Split `A..B` into its refs; an omitted side means HEAD, as in git."""
-    if "..." in spec:
-        raise ValueError(f"{spec!r}: A...B isn't supported, use A..B")
-    a, sep, b = spec.partition("..")
+def fork_point(base: str, tip: str) -> str:
+    """Where `tip`'s first-parent line leaves `base`'s history.
+
+    Unlike `git merge-base`, this stays on tip's first-parent line, so it is
+    always a valid start for `commit_chain` even if base was merged into tip.
+    """
+    out = git("rev-list", "--first-parent", tip, f"^{base}").stdout.split()
+    if not out:
+        raise ValueError(f"{tip} has no commits that aren't in {base}")
+    parent = git("rev-parse", "--verify", "--quiet", f"{out[-1]}^1", check=False)
+    if parent.returncode != 0:
+        raise ValueError(f"{base} and {tip} have no common history")
+    return parent.stdout.strip()
+
+
+def parse_range(spec: str) -> tuple[str, str, bool]:
+    """Split `A..B` or `A...B` into (a, b, symmetric); an omitted side means HEAD."""
+    symmetric = "..." in spec
+    a, sep, b = spec.partition("..." if symmetric else "..")
     if not sep:
-        raise ValueError(f"{spec!r}: expected a range like A..B")
-    return a or "HEAD", b or "HEAD"
+        raise ValueError(f"{spec!r}: expected a range like A..B or A...B")
+    return a or "HEAD", b or "HEAD", symmetric
 
 
 def range_chain(spec: str) -> list[Commit]:
-    """The chain for `A..B`, read the way `git diff A..B` reads it: A is the base."""
-    refs = parse_range(spec)
+    """The chain for `A..B` (A is the base, as in `git diff A..B`), or for `A...B`:
+    the commits on B since it forked from A (as in `git diff A...B`)."""
+    a_ref, b_ref, symmetric = parse_range(spec)
     shas = []
-    for ref in refs:
+    for ref in (a_ref, b_ref):
         sha = rev_parse(ref)
         if sha is None:
             raise ValueError(f"unknown revision {ref!r}")
         shas.append(sha)
-    (a_ref, b_ref), (a, b) = refs, shas
+    a, b = shas
     if a == b:
         raise ValueError(f"empty range: {a_ref} and {b_ref} are the same commit")
+    if symmetric:
+        return commit_chain(fork_point(a, b), b)
     if not is_ancestor(a, b):
         if is_ancestor(b, a):
             raise ValueError(f"{a_ref} is newer than {b_ref}; did you mean {b_ref}..{a_ref}?")
-        raise ValueError(f"{a_ref} is not an ancestor of {b_ref}")
+        raise ValueError(
+            f"{a_ref} is not an ancestor of {b_ref}; did you mean {a_ref}...{b_ref}?"
+        )
     return commit_chain(a, b)
 
 
@@ -347,11 +366,49 @@ class Picker(Screen[Any]):
 
 
 class BranchPicker(Picker):
+    """Enter walks one branch; `c` marks a base, then Enter compares another against it."""
+
+    PICK = "Pick a branch  (enter: select, c: compare against another, /: filter, q: quit)"
+    PICK_COMPARE = "Compare against {}: pick the branch to review  (enter: select, esc: unmark)"
+    BINDINGS = [
+        Binding("c", "compare", "Compare", tooltip="Mark highlighted branch as base, then pick one to compare"),
+    ]  # fmt: skip
+
     def __init__(self, branches: list[str]) -> None:
-        super().__init__(
-            "Pick a branch  (enter: select, /: filter, q: quit)",
-            [(b, b) for b in branches],
-        )
+        super().__init__(self.PICK, [(b, b) for b in branches])
+        self.base: str | None = None
+
+    def row_label(self, row_id: str, label: str) -> Text:
+        mark = "● " if row_id == self.base else ""
+        return Text(mark + label, no_wrap=True, overflow="ellipsis")
+
+    def action_compare(self) -> None:
+        if self.query_one(Input).has_focus or self.base is not None:
+            return
+        ol = self.query_one(OptionList)
+        if ol.highlighted is None:
+            return
+        self.base = str(ol.get_option_at_index(ol.highlighted).id)
+        self.heading = self.PICK_COMPARE.format(self.base)
+        self.refresh_heading()
+        self.fill()
+
+    def choose(self, row_id: str) -> None:
+        if self.base is None:
+            self.dismiss(row_id)
+        elif row_id == self.base:
+            self.notify("Pick a different branch to compare", severity="warning")
+        else:
+            self.dismiss((self.base, row_id))
+
+    def go_back(self) -> None:
+        if self.base is None:
+            self.dismiss(None)
+        else:
+            self.base = None
+            self.heading = self.PICK
+            self.refresh_heading()
+            self.fill()
 
 
 class CommitPicker(Picker):
@@ -804,9 +861,20 @@ class PDiffApp(App[None]):
     def show_branches(self) -> None:
         self.push_screen(BranchPicker(list_branches()), self.on_branch)
 
-    def on_branch(self, branch: str | None) -> None:
+    def on_branch(self, branch: str | tuple[str, str] | None) -> None:
         if branch is None:
             self.exit()
+            return
+        if isinstance(branch, tuple):
+            spec = f"{branch[0]}...{branch[1]}"
+            try:
+                chain = range_chain(spec)
+            except (ValueError, subprocess.CalledProcessError) as exc:
+                self.notify(str(exc), severity="error")
+                self.show_branches()
+                return
+            screen = DiffScreen(self.repo, spec, chain, self.opts)
+            self.push_screen(screen, lambda _: self.show_branches())
             return
         try:
             commits = list_commits(branch)
@@ -864,7 +932,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "range", nargs="?", metavar="A..B",
         help="open the walk from A to B directly, skipping the pickers; "
-        "read like `git diff A..B` (A is the base, an empty side means HEAD)",
+        "read like `git diff A..B` (A is the base, an empty side means HEAD). "
+        "A...B walks the commits on B since it forked from A",
     )  # fmt: skip
     p.add_argument("-C", dest="repo", metavar="PATH", help="run as if started in PATH")
     p.add_argument("-w", "--ignore-whitespace", action="store_true", help="start with whitespace ignored")

@@ -236,13 +236,18 @@ def test_filter_typing_does_not_quit(linear):
 
 @pytest.mark.parametrize(
     ("spec", "refs"),
-    [("a..b", ("a", "b")), ("a..", ("a", "HEAD")), ("..b", ("HEAD", "b")), ("..", ("HEAD", "HEAD"))],
-)
+    [
+        ("a..b", ("a", "b", False)), ("a..", ("a", "HEAD", False)),
+        ("..b", ("HEAD", "b", False)), ("..", ("HEAD", "HEAD", False)),
+        ("a...b", ("a", "b", True)), ("a...", ("a", "HEAD", True)),
+        ("...b", ("HEAD", "b", True)),
+    ],
+)  # fmt: skip
 def test_parse_range(spec, refs):
     assert pdiff.parse_range(spec) == refs
 
 
-@pytest.mark.parametrize("spec", ["main", "a...b"])
+@pytest.mark.parametrize("spec", ["main"])
 def test_parse_range_rejects(spec):
     with pytest.raises(ValueError):
         pdiff.parse_range(spec)
@@ -266,6 +271,83 @@ def test_range_chain_reads_like_git_diff(linear):
 def test_range_chain_errors(linear, spec, msg):
     with pytest.raises(ValueError, match=msg.replace("?", r"\?")):
         pdiff.range_chain(spec)
+
+
+@pytest.fixture
+def diverged(tmp_path, monkeypatch) -> dict[str, str]:
+    """main: c0 c1 c2 c3; feature forks at c1 with f1 f2. Ends on main."""
+    run(tmp_path, "init", "-b", "main")
+    s = {n: commit(tmp_path, f"{n}.txt", f"{n}\n") for n in ("c0", "c1")}
+    run(tmp_path, "checkout", "-b", "feature")
+    s |= {n: commit(tmp_path, f"{n}.txt", f"{n}\n") for n in ("f1", "f2")}
+    run(tmp_path, "checkout", "main")
+    s |= {n: commit(tmp_path, f"{n}.txt", f"{n}\n") for n in ("c2", "c3")}
+    monkeypatch.chdir(tmp_path)
+    return s
+
+
+def shas_of(spec: str) -> list[str]:
+    return [c.sha for c in pdiff.range_chain(spec)]
+
+
+def test_triple_dot_walks_branch_since_fork(diverged):
+    s = diverged
+    assert shas_of("main...feature") == [s["c1"], s["f1"], s["f2"]]
+    assert shas_of("feature...main") == [s["c1"], s["c2"], s["c3"]]
+    assert shas_of("...feature") == [s["c1"], s["f1"], s["f2"]]  # HEAD is main
+
+
+def test_triple_dot_with_base_merged_into_feature(diverged, tmp_path):
+    s = diverged
+    run(tmp_path, "checkout", "feature")
+    run(tmp_path, "merge", "--no-ff", "-m", "merge main", "main")
+    merge = run(tmp_path, "rev-parse", "HEAD")
+    f3 = commit(tmp_path, "f3.txt", "f3\n")
+    run(tmp_path, "checkout", "main")
+    # main is now fully contained in feature, but the first-parent line still forks at c1
+    assert shas_of("main...feature") == [s["c1"], s["f1"], s["f2"], merge, f3]
+
+
+def test_fork_point_errors(diverged, tmp_path):
+    with pytest.raises(ValueError, match="no commits that aren't in"):
+        pdiff.range_chain("main...main~1")
+    run(tmp_path, "checkout", "--orphan", "orphan")
+    commit(tmp_path, "o.txt", "o\n")
+    run(tmp_path, "checkout", "main")
+    with pytest.raises(ValueError, match="no common history"):
+        pdiff.range_chain("main...orphan")
+
+
+def test_double_dot_on_diverged_suggests_triple_dot(diverged):
+    with pytest.raises(ValueError, match=r"did you mean main\.\.\.feature\?"):
+        pdiff.range_chain("main..feature")
+
+
+def test_build_app_triple_dot(diverged):
+    app = pdiff.build_app(["main...feature"])
+    assert len(app.chain) == 3 and app.label == "main...feature"
+
+
+def test_branch_picker_compare_flow(diverged):
+    async def go():
+        app = pdiff.PDiffApp("repo")
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            assert isinstance(app.screen, pdiff.BranchPicker)
+            await pilot.press("c")  # mark main (current branch is listed first)
+            await pilot.press("escape")  # unmarks, doesn't leave
+            assert app.screen.base is None
+            await pilot.press("c", "down", "enter")  # compare feature against main
+            await pilot.pause()
+            screen = app.screen
+            assert isinstance(screen, pdiff.DiffScreen)
+            assert "main...feature" in screen.header_plain
+            assert "step 1/2" in screen.header_plain
+            await pilot.press("r")
+            await pilot.pause()
+            assert isinstance(app.screen, pdiff.BranchPicker)
+
+    asyncio.run(go())
 
 
 def test_range_chain_through_merge_stays_first_parent(merged):
